@@ -21,11 +21,12 @@ esc_key    	EQU     01h
 ; DATA SEGMENT
 ; ==================================================================
 DATA_SEG SEGMENT USE16 PUBLIC 'DATA'
+    initvid      DB       (0)  ; Initial video mode
     int8set      DB       (0)  ; Indicates that INT8 hadnler registered 
     int9set      DB       (0)  ; Indicates that INT9 hadnler registered
     int8ptr      DW 2 DUP (0)  ; System INT8 handler
     int9ptr      DW 2 DUP (0)  ; System INT9 handler
-    ms_dos_busy  DD       (?)  ; логічна адреса ознаки зайнятості MS-DOS
+    ms_dos_busy  DW 2 DUP (0)  ; Address of the MS-DOS busy flag
     X_POS        DW       (10)  
 DATA_SEG ENDS
 ; ==================================================================
@@ -45,68 +46,45 @@ ASSUME CS:CODE_SEG, DS:DATA_SEG, SS:STACK_SEG
 ; SETINT8 - Setups castom INT9 hadnler (timer interrupt)
 ; ==================================================================
 SETINT8 PROC
-    pusha
+    pusha                   ; Save register states
     push DS
-
-    push DATA_SEG
+    
+    push DATA_SEG           ; Load data segment
     pop DS
+
+    cmp int8set, 0          ; If handler already registered, skip it
+    jne skip_setint8
+    
+    mov	ah, 35h             ; Get system INT8 handler from DOS. 
+                            ; Returned value: ES:BX - address of the system procedure
+    mov al, 8
+    int 21h  
+    mov int8ptr, bx         ; Saving system INT8 handler for future usage and restoring   
+    mov int8ptr + 2, ES  
    
-    cmp int8set, 0
-    jne zero_8
-
-    mov	ah, 35h ; отримати вектор переривання
-    mov al, 8   ; переривання від таймера (8)
-    int 21h     ; значення що повертається:
-                ; es:bx - логічна адреса системної процедури
-                ; обробки переривання від таймера
-
-
-    mov int8ptr, bx      ; зберегти логічну адресу системної
-    mov int8ptr + 2, es  ; процедури в сегменті кодів
-
-    mov dx, offset userint8	; формування в ds:dx логічної
-                            ; адреси процедури користувача
-                            ; для обробки переривань від таймера
-
-    push ds         ; Збереження вмісту DS
-
-    push cs
-    pop ds
-
-    mov ah, 25h ; встановити вектор
-    mov al, 8   ; переривання від таймера
-    int 21h     ; ds:dx - покажчик на користувацьку
-                ; процедуру оброб. переривання від ;таймера
-
-
-    mov ax, time_slice  ; встановити задану величину кванту часу
-    out 40h, al         ; 40h - адреса 8-розрядного порта таймера,
-                        ; через який задають період таймера
-                        ; спочатку молодший байт,
-                        ; а потім старший
-
-    jmp $+2     ; стандартний метод узгодження швидкісного
-                ; процесора з більш повільним зовнішнім
-                ; пристроєм. Припускаємо, що
-                ; "безглузда" команда jmp очищує буфер
-                ; попередньої вибірки команд і, тим самим,
-                ; уповільнює роботу процесора. Тим часом
-                ; зовнішній пристрій буде готовий
-                ; прийняти наступний байт
-
-    nop
-
-    mov al, ah ; (старший байт)
-    out 40h, al
-
-    pop ds ; Відновлюємо зміст DS
-
-    mov int8set, 0ffh ; заборона повторних входжень
-
-zero_8:
+    mov dx, offset userint8	; Creating address of the custom handler
+    push DS                 ; Save current DS value  
+    push CS
     pop DS
-    popa
+    mov ah, 25h             ; Setup custom INT8 handler stored in DS:BX
+    mov al, 8   
+    int 21h     
+    mov ax, time_slice 
+    out 40h, al             ; Set timer interval (low byte)  
+    
+    nop                     ; Wait 4 cycles
+    nop         
+    nop  
+    nop
+    
+    mov al, ah
+    out 40h, al             ; Set timer interval (high byte)
+    pop ds                  ; Restore DS value
+    mov int8set, 0ffh       ; Mark INT8 as registered
 
+skip_setint8:
+    pop DS                  ; Restore registers state
+    popa
     ret
 SETINT8 ENDP
 ; ==================================================================
@@ -117,31 +95,35 @@ SETINT8 ENDP
 ;  RETINT8 - Restores system INT8 handler
 ; ==================================================================
 RETINT8 PROC
-    pusha
+    pusha                   ; Save register states
     push ds
 
-    mov al, 0ffh    ; відновити нормальну роботу
-    out 40h, al     ; системного таймера
+    push DATA_SEG           ; Load data segment
+    pop DS
+
+    cmp int9set, 0          ; If handler is not registered, skip it
+    je skip_retint8
+
+    mov al, 0ffh            ; Restore default timer behavior
+    out 40h, al             
     
-    jmp	$+2
+    nop                     ; Wait 4 cycles
+    nop         
+    nop  
     nop
-    
-    out 40h, al
+    out 40h, al             
 
-    mov dx, int8ptr
+    mov dx, int8ptr         ; DS:DX - address of the system function
     mov ds, int8ptr + 2
+    mov ah, 25h             ; Restore system INT8 handler
+    mov al, 8     
+    int 21h       
 
-    mov ah, 25h   ; відновити початковий вектор
-    mov al, 8     ; переривання від таймера
-    int 21h       ; ds:dx - вказівник (логічна адреса) 
-                ; на початкову (системну) процедуру
-                ;	оброб. переривання від таймера
+    mov int8set, 0          ; Unmark INT8 as registered          
 
-    mov int8set,0h ; дозвіл наступних "перехоплень"
-
-    pop ds
+skip_retint8:
+    pop ds                  ; Restore registers state
     popa
-
     ret
 RETINT8 ENDP
 ; ==================================================================
@@ -152,45 +134,39 @@ RETINT8 ENDP
 ; SETINT9 - Setups castom INT9 hadnler (keyboard interrupt)
 ; ==================================================================
 SETINT9 PROC
-    pusha
+    pusha                   ; Save registers state
     push DS
 
-    push DATA_SEG
+    push DATA_SEG           ; Load data segment
     pop DS
 
-    mov	al, int9set
-    or al, al
-    jnz zero_9
+    cmp int9set, 0          ; If handler already registered, skip it
+    jne skip_setint9
 
-    mov	ah, 34h
-    int	21h	        ; es:bx - адреса ознаки зайнятості MS-DOS
-    mov	word ptr ms_dos_busy, bx
-    mov	word ptr ms_dos_busy + 2, es
+    mov	ah, 34h             ; Get MS-DOS busy flag. Result stored in ES:BX
+    int	21h	        
+    mov	ms_dos_busy, bx      ; Store its address and segment selector    
+    mov	ms_dos_busy + 2, ES
     
-    mov ah, 35h ; отримати вектор переривання
-    mov al, 9   ; переривання від клавіатури (9)
-    int 21h     ; значення що повертається:
-                ; es:bx - вказівник на системну процедуру
-                ; обробки переривання від клавіатури
+    mov	ah, 35h             ; Get system INT8 handler from DOS. 
+                            ; Returned value: ES:BX - address of the system procedure
+    mov al, 9
+    int 21h  
+    mov int9ptr, bx          ; Saving system INT8 handler for future usage and restoring   
+    mov int9ptr + 2, ES  
 
-    mov int9ptr, bx      ; зберегти в сегменті кодів вказівник 
-    mov int9ptr + 2, es  ; на системну процедуру
-
-    mov dx, offset userint9
-    push ds
-    push cs         ; ds:dx - вказівник на процедуру користувача
-    pop ds			; оброб. переривання від клавіатури
-
-    mov ah, 25h  ; встановити вектор "перехоплення"
-    mov al, 9    ; переривання від клавіатури (9)
-    int 21h       
-
-    pop ds
-
-    mov int9set,0ffh        	; заборона повторних входжень
-zero_9:
-
+    mov dx, offset userint9	; Creating address of the custom handler
+    push DS                 ; Save current DS value  
+    push CS
     pop DS
+    mov ah, 25h             ; Setup custom INT8 handler stored in DS:BX
+    mov al, 9                  
+    int 21h  
+
+    pop ds                  ; Restore DS value
+    mov int9set, 0ffh       ; Mark INT8 as registered
+skip_setint9:
+    pop DS                  ; Restore registers state
     popa
     ret
 SETINT9 ENDP
@@ -202,26 +178,27 @@ SETINT9 ENDP
 ;  RETINT9 - Restores system INT9 handler
 ; ==================================================================
 RETINT9 PROC
-    pusha
+    pusha                   ; Save registers state
     push DS
   
-    push DATA_SEG
+    push DATA_SEG           ; Load data segment
     pop DS
 
-    mov dx, int9ptr      ; ds:dx - покажчик на початкову (системну)
-    mov DS, int9ptr+2    ; процедуру обробки переривання від
-                            ; клавіатури
+    cmp int9set, 0          ; If handler is not registered, skip it
+    je skip_retint9
 
-    mov ah, 25h     ; встановити вектор системної процедури
-    mov al, 9       ; обробки переривання від клавіатури
+    mov dx, int9ptr         ; Store system handler to ds:dx
+    mov DS, int9ptr + 2
+    mov ah, 25h             ; Replace custom handler with a system one
+    mov al, 9       
     int 21h                   	 
 
-    mov int9set, 0h ; дозвіл наступних "перехоплень"
-    
-    pop DS
+    mov int9set, 0          ; Unmark handler as registered
+
+skip_retint9:
+    pop DS                  ; Restore registers state
     popa
     ret
-
 RETINT9 ENDP
 ; ==================================================================
 
@@ -231,28 +208,24 @@ RETINT9 ENDP
 ;  USERINT9 - Custom INT8 Handler (Timer Interrupt)
 ; ==================================================================
 userint8 PROC far
-
-    pushad      ; збереження РОН в стеку перерваної задачі
+    pusha                   ; Save registers state
     push ds
-    pushf
 
     push DATA_SEG
-    pop ds       ; в перерваній програмі вміст сегментного регістра
+    pop ds                  ; Load data segment
 
-    call dword ptr int8ptr
-
+    pushf
+    call dword ptr int8ptr  ; Call a system timer hadnler 
 
     inc X_POS
-
-    push X_POS
+    push X_POS              ; Draw some stuff on the screen
     push 20
     push X_POS 
     call PLOT
 
-    pop ds
-    popad                   ; продовжити виконання перерваної задачі
-    iret
-
+    pop ds                  ; Restore registers state
+    popa                    
+    iret                    ; Exit from the interrupt
 userint8 ENDP
 ; ==================================================================
 
@@ -263,95 +236,82 @@ userint8 ENDP
 ;  USERINT9 - Custom INT9 Handler (Keyboard Interrupt)
 ; ==================================================================
 USERINT9 PROC FAR
-    pusha
+    pusha                   ; Save registers state        
     push DS
     push ES
 
-    in al, 60h      ; ввести скан-код - розряди 0-6
-    mov ah, al	    ; 7-ий розряд дорівнює 0 при натисканні
-    and al, 7fh     ; клавіші, 1- при відтисканні
-
-    push DATA_SEG
+    push DATA_SEG           ; Load data segment
     pop DS
 
-    cmp al, esc_key
+    in al, 60h              ; Input key scan-code. 7th bit - pressing flag
+    mov ah, al	            
+    and al, 7fh             
+
+    cmp al, esc_key         ; Select keys to handle
     je btn_pressed
 
-        
+    pop ES                  ; Restore registers state, to exit from the function
+    pop DS
+    popa
+    jmp dword ptr int9ptr   ; Call system handler for the keys we dont care about
 
-        ; ПЕРЕДАЧА ВИРІШЕННЯ ПРОБЛЕМ З КЛАВІАТУРОЮ СИСТЕМІ (Варіант 2)
-        pop ES
-        pop DS
-        popa
-        jmp dword ptr int9ptr ; перехід на системну
-                                    ; процедуру обробки
-                                    ; переривань від клавіатури, яка
-                                    ; виконає всі необхідні дії, включаючи
-                                    ; повернення в перервану програму
+btn_pressed:
+    in al, 61h              ; Getting initial value of the pulse
+    mov ah, al
+    or al, 80h              ; Set 7th bit to 1				 
+    out 61h, al             ; Sending confirming pulse to keyboard to unlock it (first byte)
 
-    btn_pressed:
-        ; САМОСТІЙНЕ ВИРІШЕННЯ ПРОБЛЕМ З КЛАВІАТУРОЮ (Варіант 1)
-        mov bx, ax
-        in al, 61h  ; біт 7 порта 61h призначений для введення
-                    ; підтверджуючого імпульсу в клавіатуру ПЕОМ.
-                    ; Клавіатура блокується поки не надійде
-                    ; підтверджуючий імпульс
-                    
-        mov ah, al
-        or al, 80h  ; set 7th bit to 1				 
-            
-        out 61h, al ; виведення на клавіатуру 1й байт	 
-
-        jmp $ + 2	
-        
-        mov al, ah  ; виведення на клавіатуру 2й байт					  
-        out 61h, al ; підтверджуючого імпульсу
-
-        mov al, 20h ; розблокувати в контролері переривання
-                    ; проходження запитів на переривання 
-                    ; поточного та меншого рівнів пріоритету,
-        
-        out 20h, al ; що забезпечить можливість наступного 
-                    ; переривання від клавіатури
-
-        mov ax, bx
-        cmp ah, al  ; перевірка події переривання - від натискання
-                    ; чи від відтискання клавіші клавіатури
-        je usr9_end ; відтискання клавіші
-
+    nop                     ; Wait 4 cycles
+    nop         
+    nop  
+    nop	
     
-        push es
-        les	bx, ms_dos_busy	; es:bx - адреса ознаки 
-                                ; зайнятості MS-DOS
-        mov	al, es:[bx]			; al - ознака зайнятості MS-DOS
-        pop	es
-        
-        or al, al   ; перевірка якщо була перервана робота MS-DOS
-                    ; в "невдалий" момент то не можна від неї вимагати
-                    ; виконання ряду функцій (в загальному випадку MS-DOS 
-                    ; не забезпечує повторне входження)
-        jnz usr9_end
+    mov al, ah  				  
+    out 61h, al             ; Sending confirming pulse to keyboard to unlock it (first byte)
 
-        call retint8
-        call retint9
+    mov al, 20h 
+    out 20h, al             ; Sending signal to IC to unlock INT8 
 
-        ; Clear screen
-        mov ax, 3
-        int 10h
+    push ES                 ; Save ES state                 
+    
+    mov bx, ms_dos_busy     ; Store addres of the flag to ES:DX
+    mov ES, ms_dos_busy + 2
 
-        mov ax, 4c00h
-        int 21h         ; ЗАКІНЧИТИ РОБОТУ
-                        ; БАГАТОПРОГРАМНОЇ МОДЕЛІ
+    mov	al, es:[bx]			; Get busy flag
+    pop	es                  ; Restore ES State
+    
+    or al, al               ; If MS-DOS is busy right now (we interrupted system interruption), exiting
+    jnz usr9_end            
+
+    call exitp              ; Exit the proram
 
 usr9_end:
-        
-    pop ES ; відновити стек перерваної програми
-    pop DS ; відновити стек перерваної програми
+    pop ES              
+    pop DS                  ; Restore registers state 
     popa
-    
-    iret ; закінчити обробку переривання
+    iret                    ; Exit from the interrupt
+USERINT9 ENDP
+; ==================================================================
 
-userint9 ENDP
+
+
+; ==================================================================
+; EXITP - Restores default interrupt handlers and closes the program
+; ==================================================================
+EXITP PROC
+    push DATA_SEG           ; Load data segment
+    pop DS
+
+    call retint8            ; Restore default timer interrupt handler
+    call retint9            ; Restore default keyboard interrupt handler
+
+    mov ah, 0               ; Set new video mode
+    mov al, initvid         ; Set initial video mode
+    int 10h                 
+
+    mov ax, 4c00h
+    int 21h                 ; Exit to MS-DOS
+EXITP ENDP
 ; ==================================================================
 
 
@@ -363,39 +323,32 @@ userint9 ENDP
 ;    16bit - Pixel color
 ; ==================================================================
 PLOT PROC NEAR
-    ; Save stack state
-    push bp         
+    push bp                  ; Save stack state  
     mov bp, sp
-    ; Save registers state
-    pusha
+    pusha                    ; Save registers state
     push ES
     
-    ; ES storing graphics address
-    push 0A000h
+    push 0A000h             ; ES storing graphics address
     pop ES
     
-    mov cx, [bp + 8] ; x
-    mov dx, [bp + 6] ; y
-
-    ; Calculate memory offset
-    mov bx, dx
-    shl bx, 8   ; *256
-    shl dx, 6   ; *64
-    add bx, dx
+    mov cx, [bp + 8]        ; x
+    mov dx, [bp + 6]        ; y
+    
+    mov bx, dx              ; Calculate memory offset
+    shl bx, 8               ; *256
+    shl dx, 6               ; *64
+    add bx, dx              ; *256 + *64 = 320
     add bx, cx
 
-    mov ax, [bp + 4] ; color
-    ; Plot the pixel
-    mov byte ptr es:[bx], al
+    mov ax, [bp + 4]        ; color
+    mov es:[bx], al         ; Plot the pixel 
     
-    pop ES
-
-    ; Restore registers
-    popa
-    ; Restore stack
-    pop bp
+    pop ES                  ; Restore ES state
+    popa                    ; Restore registers
+    pop bp                  ; Restore stack
     ret 6      
 PLOT ENDP
+; ==================================================================
 
 
 
@@ -410,8 +363,13 @@ begin:
     push STACK_SEG
     pop SS
 
+    mov ah, 0Fh
+    int 10h 
+    mov initvid, al
+
     ; Init graphic VGA mode
-    mov ax, 013h
+    mov ah, 0h              ; Set video mode
+    mov al, 013h            ; VGA mode
     int 10h 
 
     call SETINT9
@@ -420,14 +378,8 @@ begin:
     lp:
     jmp lp
 
-    ; Return default video mode
-    mov ax, 3h 	
-    int 10h
-
-    ; Exit to DOS
-    mov ax,4C00h 	
-    int 21h
-
+    call EXITP              ; Close the program
+   
 CODE_SEG ENDS
 end begin
 ; ==================================================================
