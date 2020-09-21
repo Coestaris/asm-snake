@@ -15,7 +15,10 @@ time_slice  EQU     10000
 ; Scan-code of the ECS key
 esc_key    	EQU     01h   
 
-
+; Window width
+win_w       EQU     320
+; Window height
+win_h       EQU     240
 
 ; ==================================================================
 ; DATA SEGMENT
@@ -333,6 +336,12 @@ PLOT PROC NEAR
     
     mov cx, [bp + 8]        ; x
     mov dx, [bp + 6]        ; y
+
+    cmp cx, win_w           ; Check X bounds
+    jge plot_end
+
+    cmp dx, win_h           ; Check Y bounds
+    jge plot_end
     
     mov bx, dx              ; Calculate memory offset
     shl bx, 8               ; *256
@@ -343,6 +352,7 @@ PLOT PROC NEAR
     mov ax, [bp + 4]        ; color
     mov es:[bx], al         ; Plot the pixel 
     
+plot_end:
     pop ES                  ; Restore ES state
     popa                    ; Restore registers
     pop bp                  ; Restore stack
